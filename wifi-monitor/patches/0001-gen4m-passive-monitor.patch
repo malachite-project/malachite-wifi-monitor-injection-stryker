@@ -1,0 +1,651 @@
+diff --git a/connectivity/wlan/core/gen4m/Kbuild.6878 b/connectivity/wlan/core/gen4m/Kbuild.6878
+--- a/connectivity/wlan/core/gen4m/Kbuild.6878
++++ b/connectivity/wlan/core/gen4m/Kbuild.6878
+@@ -10,5 +10,7 @@
+ MTK_ANDROID_WMT := y
+ MTK_ANDROID_EMI := y
+ MODULE_NAME := wlan_drv_gen4m_6878
++CONFIG_SNIFFER_RADIOTAP := y
++CONFIG_SNIFFER_PDMA_SCATTER := n
+ 
+ include $(KO_CODE_PATH)/Kbuild.main
+diff --git a/connectivity/wlan/core/gen4m/Kbuild.main b/connectivity/wlan/core/gen4m/Kbuild.main
+--- a/connectivity/wlan/core/gen4m/Kbuild.main
++++ b/connectivity/wlan/core/gen4m/Kbuild.main
+@@ -1189,7 +1189,9 @@
+ 
+ ifeq ($(CONFIG_SNIFFER_RADIOTAP), y)
+     ccflags-y += -DCFG_SUPPORT_SNIFFER_RADIOTAP
+-    ccflags-y += -DCFG_SUPPORT_PDMA_SCATTER
++    ifneq ($(CONFIG_SNIFFER_PDMA_SCATTER), n)
++        ccflags-y += -DCFG_SUPPORT_PDMA_SCATTER
++    endif
+ endif
+ 
+ ifneq ($(filter 6765, $(WLAN_CHIP_ID)),)
+diff --git a/connectivity/wlan/core/gen4m/common/wlan_oid.c b/connectivity/wlan/core/gen4m/common/wlan_oid.c
+--- a/connectivity/wlan/core/gen4m/common/wlan_oid.c
++++ b/connectivity/wlan/core/gen4m/common/wlan_oid.c
+@@ -14947,7 +14947,7 @@
+ 	struct GLUE_INFO *prGlueInfo;
+ 	struct CMD_MONITOR_SET_INFO *prCmdMonitor;
+ 
+-	prCmdMonitor = kalMemAlloc(
++	prCmdMonitor = kalMemZAlloc(
+ 		sizeof(struct CMD_MONITOR_SET_INFO), VIR_MEM_TYPE);
+ 	if (!prCmdMonitor) {
+ 		log_dbg(OID, ERROR, "alloc CmdMonitor fail\n");
+diff --git a/connectivity/wlan/core/gen4m/nic/nic_rxd_v2.c b/connectivity/wlan/core/gen4m/nic/nic_rxd_v2.c
+--- a/connectivity/wlan/core/gen4m/nic/nic_rxd_v2.c
++++ b/connectivity/wlan/core/gen4m/nic/nic_rxd_v2.c
+@@ -711,18 +711,17 @@
+ 		prRxStatusGroup5 == NULL)
+ 		return FALSE;
+ 
+-	prSwRfb->u2RxByteCount =
+-		(uint16_t) HAL_MAC_CONNAC2X_RX_STATUS_GET_RX_BYTE_CNT(prRxStatus);
+-
+-	prSwRfb->ucHwBandIdx =
+-		HAL_MAC_CONNAC2X_RX_STATUS_GET_BAND_IDX(prRxStatus);
+-
++	prSwRfb->u2RxByteCount = HAL_MAC_CONNAC2X_RX_STATUS_GET_RX_BYTE_CNT(prRxStatus);
++	u4HeaderOffset = HAL_MAC_CONNAC2X_RX_STATUS_GET_HEADER_OFFSET(prRxStatus);
++	u2RxStatusOffset += u4HeaderOffset;
++	if (prSwRfb->u2RxByteCount <= u2RxStatusOffset)
++		return FALSE;
++
++	prSwRfb->ucHwBandIdx = HAL_MAC_CONNAC2X_RX_STATUS_GET_BAND_IDX(prRxStatus);
++	if (prSwRfb->ucHwBandIdx >= CFG_MONITOR_BAND_NUM)
++		return FALSE;
+ 	if (HAL_MAC_CONNAC2X_RX_STATUS_GET_RXV_SEQ_NO(prRxStatus) != 0)
+ 		prGlueInfo->u4AmpduRefNum[prSwRfb->ucHwBandIdx] += 1;
+-
+-	u4HeaderOffset = (uint32_t) (
+-		HAL_MAC_CONNAC2X_RX_STATUS_GET_HEADER_OFFSET(prRxStatus));
+-	u2RxStatusOffset += u4HeaderOffset;
+ 
+ 	prRadiotapInfo = prSwRfb->prRadiotapInfo;
+ 	prRadiotapInfo->u2VendorLen = u2RxStatusOffset;
+diff --git a/connectivity/wlan/core/gen4m/nic/nic_rxd_v3.c b/connectivity/wlan/core/gen4m/nic/nic_rxd_v3.c
+--- a/connectivity/wlan/core/gen4m/nic/nic_rxd_v3.c
++++ b/connectivity/wlan/core/gen4m/nic/nic_rxd_v3.c
+@@ -788,18 +788,17 @@
+ 		prRxStatusGroup5 == NULL)
+ 		return FALSE;
+ 
+-	prSwRfb->u2RxByteCount =
+-		(uint16_t) HAL_MAC_CONNAC3X_RX_STATUS_GET_RX_BYTE_CNT(prRxStatus);
+-
+-	prSwRfb->ucHwBandIdx =
+-		HAL_MAC_CONNAC3X_RX_STATUS_GET_BAND_IDX(prRxStatus);
+-
++	prSwRfb->u2RxByteCount = HAL_MAC_CONNAC3X_RX_STATUS_GET_RX_BYTE_CNT(prRxStatus);
++	u4HeaderOffset = HAL_MAC_CONNAC3X_RX_STATUS_GET_HEADER_OFFSET(prRxStatus);
++	u2RxStatusOffset += u4HeaderOffset;
++	if (prSwRfb->u2RxByteCount <= u2RxStatusOffset)
++		return FALSE;
++
++	prSwRfb->ucHwBandIdx = HAL_MAC_CONNAC3X_RX_STATUS_GET_BAND_IDX(prRxStatus);
++	if (prSwRfb->ucHwBandIdx >= CFG_MONITOR_BAND_NUM)
++		return FALSE;
+ 	if (HAL_MAC_CONNAC3X_RX_STATUS_GET_RXV_SEQ_NO(prRxStatus) != 0)
+ 		prGlueInfo->u4AmpduRefNum[prSwRfb->ucHwBandIdx] += 1;
+-
+-	u4HeaderOffset = (uint32_t) (
+-		HAL_MAC_CONNAC3X_RX_STATUS_GET_HEADER_OFFSET(prRxStatus));
+-	u2RxStatusOffset += u4HeaderOffset;
+ 
+ 	prRadiotapInfo = prSwRfb->prRadiotapInfo;
+ 	prRadiotapInfo->u2VendorLen = u2RxStatusOffset;
+diff --git a/connectivity/wlan/core/gen4m/nic/radiotap.c b/connectivity/wlan/core/gen4m/nic/radiotap.c
+--- a/connectivity/wlan/core/gen4m/nic/radiotap.c
++++ b/connectivity/wlan/core/gen4m/nic/radiotap.c
+@@ -396,10 +396,11 @@
+ 	if (prRxDescOps->nic_rxd_fill_radiotap) {
+ 		prSwRfb->prRadiotapInfo = &radiotapInfo;
+ 		ucFillRadiotap = prRxDescOps->nic_rxd_fill_radiotap(prAdapter, prSwRfb);
++		prSwRfb->prRadiotapInfo = NULL;
+ 	}
+ 
+ 	if (ucFillRadiotap == FALSE) {
+-		DBGLOG(RX, ERROR, "fill radiotap info fail!\n");
++		DBGLOG_LIMITED(RX, WARN, "fill radiotap info failed\n");
+ 		goto bypass;
+ 	}
+ 
+@@ -558,6 +559,8 @@
+ 	header->u2ItLen = CPU_TO_LE16(radiotap_len);
+ 	header->u4ItPresent = present;
+ 
++	GLUE_SET_PKT_FLAG(prSwRfb->pvPacket, ENUM_PKT_802_11);
++
+ 	for (func_idx = 0; func_idx < func_num; func_idx++)	{
+ 		p_data = p_base + radiotap_fill_func[func_idx].offset;
+ 		radiotap_fill_func[func_idx].radiotap_fill_func(&radiotapInfo, p_data);
+diff --git a/connectivity/wlan/core/gen4m/os/linux/gl_cfg80211.c b/connectivity/wlan/core/gen4m/os/linux/gl_cfg80211.c
+--- a/connectivity/wlan/core/gen4m/os/linux/gl_cfg80211.c
++++ b/connectivity/wlan/core/gen4m/os/linux/gl_cfg80211.c
+@@ -6035,16 +6035,17 @@
+ 	DBGLOG(INIT, INFO, "enable sniffer mode\n");
+ }
+ 
+-void mtk_uninit_monitor_role(struct wiphy *wiphy,
++static int mtk_uninit_monitor_role(struct wiphy *wiphy,
+ 			struct net_device *ndev)
+ {
+ 	struct GLUE_INFO *prGlueInfo;
+-	uint8_t i = 0, ucBandIdx;
+-
+-	WIPHY_PRIV(wiphy, prGlueInfo);
+-
+-	if ((prGlueInfo == NULL) || (ndev == NULL))
+-		return;
++	uint8_t i, ucBandIdx;
++	int ret;
++
++	WIPHY_PRIV(wiphy, prGlueInfo);
++
++	if (!prGlueInfo || !ndev)
++		return -EINVAL;
+ 
+ 	if (prGlueInfo->fgIsEnableMon) {
+ 		prGlueInfo->fgIsEnableMon = FALSE;
+@@ -6056,8 +6057,12 @@
+ 				prGlueInfo->aucBandIdxEn[i]) {
+ 				/* ucBandIdx will be used to disable monitor */
+ 				prGlueInfo->ucBandIdx = i;
+-				mtk_cfg80211_set_monitor_channel(wiphy,
+-					NULL);
++				ret = mtk_cfg80211_set_monitor_channel(wiphy, NULL);
++				if (ret) {
++					prGlueInfo->ucBandIdx = ucBandIdx;
++					prGlueInfo->fgIsEnableMon = TRUE;
++					return ret;
++				}
+ 			}
+ 		}
+ 		prGlueInfo->ucBandIdx = 0xFF;
+@@ -6066,6 +6071,7 @@
+ 	ndev->type = ARPHRD_ETHER;
+ 	ndev->ieee80211_ptr->iftype = NL80211_IFTYPE_STATION;
+ 	DBGLOG(INIT, INFO, "disable sniffer mode\n");
++	return 0;
+ }
+ #endif /* CFG_SUPPORT_SNIFFER_RADIOTAP */
+ 
+@@ -6690,6 +6696,10 @@
+ 	struct ADAPTER *prAdapter = NULL;
+ 	struct NETDEV_PRIVATE_GLUE_INFO *prNetdevPriv = NULL;
+ 	struct P2P_INFO *prP2pInfo = NULL;
++#ifdef CFG_SUPPORT_SNIFFER_RADIOTAP
++	struct wireless_dev *wdev;
++	int ret;
++#endif
+ #if KERNEL_VERSION(4, 12, 0) <= CFG80211_VERSION_CODE
+ 	u32 *flags = NULL;
+ #endif
+@@ -6708,6 +6718,27 @@
+ 		DBGLOG(REQ, WARN, "ndev is NULL\n");
+ 		return -EINVAL;
+ 	}
++
++#ifdef CFG_SUPPORT_SNIFFER_RADIOTAP
++	/* Monitor mode changes the adapter-wide RX path. */
++	if (type == NL80211_IFTYPE_MONITOR) {
++		if (ndev != prGlueInfo->prDevHandler ||
++		    (ndev->ieee80211_ptr->iftype != NL80211_IFTYPE_STATION &&
++		     ndev->ieee80211_ptr->iftype != NL80211_IFTYPE_MONITOR))
++			return -EOPNOTSUPP;
++		if (ndev->ieee80211_ptr->iftype == NL80211_IFTYPE_STATION &&
++		    (netif_running(ndev) || prGlueInfo->fgIsEnableMon))
++			return -EBUSY;
++		list_for_each_entry(wdev, &wiphy->wdev_list, list) {
++			if (wdev->netdev && wdev->netdev != ndev &&
++			    netif_running(wdev->netdev))
++				return -EBUSY;
++		}
++	} else if (ndev->ieee80211_ptr->iftype == NL80211_IFTYPE_MONITOR &&
++		   (type != NL80211_IFTYPE_STATION || netif_running(ndev))) {
++		return -EBUSY;
++	}
++#endif
+ 
+ 	prNetdevPriv = (struct NETDEV_PRIVATE_GLUE_INFO *)
+ 		       netdev_priv(ndev);
+@@ -6769,11 +6800,6 @@
+ 			return -EFAULT;
+ 		}
+ 
+-#ifdef CFG_SUPPORT_SNIFFER_RADIOTAP
+-		if (ndev->ieee80211_ptr->iftype == NL80211_IFTYPE_MONITOR)
+-			mtk_uninit_monitor_role(wiphy, ndev);
+-		else
+-#endif /* CFG_SUPPORT_SNIFFER_RADIOTAP */
+ 		if (ndev->ieee80211_ptr->iftype == NL80211_IFTYPE_STATION)
+ 			mtk_uninit_sta_role(prAdapter, ndev);
+ 
+@@ -6787,11 +6813,8 @@
+ 		}
+ #ifdef CFG_SUPPORT_SNIFFER_RADIOTAP
+ 	} else if (type == NL80211_IFTYPE_MONITOR) {
+-		if (ndev->ieee80211_ptr->iftype == NL80211_IFTYPE_STATION)
+-			mtk_uninit_sta_role(prAdapter, ndev);
+-		else if (ndev->ieee80211_ptr->iftype == NL80211_IFTYPE_AP)
+-			mtk_uninit_ap_role(prGlueInfo, ndev);
+-
++		if (mtk_uninit_sta_role(prAdapter, ndev))
++			return -EIO;
+ 		mtk_init_monitor_role(wiphy, ndev);
+ #endif
+ 	} else {
+@@ -6804,9 +6827,15 @@
+ 			}
+ 		}
+ #ifdef CFG_SUPPORT_SNIFFER_RADIOTAP
+-		else if (ndev->ieee80211_ptr->iftype ==
+-				NL80211_IFTYPE_MONITOR)
+-			mtk_uninit_monitor_role(wiphy, ndev);
++		else if (ndev->ieee80211_ptr->iftype == NL80211_IFTYPE_MONITOR) {
++			ret = mtk_uninit_monitor_role(wiphy, ndev);
++			if (ret)
++				return ret;
++			if (mtk_init_sta_role(prAdapter, ndev))
++				return -EIO;
++			return mtk_cfg80211_change_iface(wiphy, ndev, type,
++							flags, params);
++		}
+ #endif /* CFG_SUPPORT_SNIFFER_RADIOTAP */
+ 
+ 		mtk_init_sta_role(prAdapter, ndev);
+@@ -8533,6 +8562,11 @@
+ 	}
+ 
+ 	if (chandef) {
++		if (!prGlueInfo->fgIsEnableMon)
++			return -EBUSY;
++		if (!cfg80211_chandef_valid(chandef))
++			return -EINVAL;
++
+ 		ucPriChannel =
+ 		ieee80211_frequency_to_channel(chandef->chan->center_freq);
+ 		ucChannelS1 =
+@@ -8568,6 +8602,7 @@
+ 			else
+ 				ucSco = CHNL_EXT_SCB;
+ 			break;
++		case NL80211_CHAN_WIDTH_20_NOHT:
+ 		case NL80211_CHAN_WIDTH_20:
+ 			ucChannelWidth = CW_20_40MHZ;
+ 			break;
+@@ -8584,7 +8619,7 @@
+ 	prGlueInfo->ucSco = ucSco;
+ 
+ 	rStatus = kalIoctl(prGlueInfo, wlanoidSetMonitor, NULL, 0, &u4BufLen);
+-
+-	return 0;
+-}
+-#endif
++	/* The command is sent without a firmware response. */
++	return rStatus == WLAN_STATUS_SUCCESS ? 0 : -EIO;
++}
++#endif
+diff --git a/connectivity/wlan/core/gen4m/os/linux/gl_cmd_validate.c b/connectivity/wlan/core/gen4m/os/linux/gl_cmd_validate.c
+--- a/connectivity/wlan/core/gen4m/os/linux/gl_cmd_validate.c
++++ b/connectivity/wlan/core/gen4m/os/linux/gl_cmd_validate.c
+@@ -526,16 +526,6 @@
+ 	{
+ 		.pcCmdStr  = CMD_SET_SNIFFER,
+ 		.pfHandler = priv_driver_sniffer,
+-		.argPolicy = VERIFY_MIN_ARG_NUM,
+-		.ucArgNum  = COMMON_CMD_SET_ARG_NUM(1),
+-		.policy    = NULL,
+-		.u4PolicySize = 0
+-	},
+-#endif
+-#ifdef CFG_SUPPORT_SNIFFER_RADIOTAP
+-	{
+-		.pcCmdStr  = CMD_SET_MONITOR,
+-		.pfHandler = priv_driver_set_monitor,
+ 		.argPolicy = VERIFY_MIN_ARG_NUM,
+ 		.ucArgNum  = COMMON_CMD_SET_ARG_NUM(1),
+ 		.policy    = NULL,
+diff --git a/connectivity/wlan/core/gen4m/os/linux/gl_init.c b/connectivity/wlan/core/gen4m/os/linux/gl_init.c
+--- a/connectivity/wlan/core/gen4m/os/linux/gl_init.c
++++ b/connectivity/wlan/core/gen4m/os/linux/gl_init.c
+@@ -158,6 +158,10 @@
+ 
+ /* MODULE_LICENSE("MTK Propietary"); */
+ MODULE_LICENSE("Dual BSD/GPL");
++#if defined(SOC7_0) && defined(CFG_SUPPORT_SNIFFER_RADIOTAP) && \
++	!defined(CFG_SUPPORT_PDMA_SCATTER)
++MODULE_VERSION("malachite-passive-1");
++#endif
+ 
+ #ifdef CFG_DRIVER_INF_NAME_CHANGE
+ char *gprifnamesta = "";
+@@ -442,69 +446,6 @@
+ 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+ 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+ };
+-#endif
+-
+-#ifdef CFG_SUPPORT_SNIFFER_RADIOTAP
+-static struct dentry *dbgFsDir;
+-
+-static int debugfs_u8_get(void *data, uint64_t *val)
+-{
+-	*val = *(uint8_t *)data;
+-	return 0;
+-}
+-
+-static int debugfs_u8_set(void *data, uint64_t val)
+-{
+-	*(uint8_t *)data = val;
+-	return 0;
+-}
+-
+-DEFINE_SIMPLE_ATTRIBUTE(fops_u8, debugfs_u8_get, debugfs_u8_set, "%llu\n");
+-
+-static int debugfs_u16_get(void *data, uint64_t *val)
+-{
+-	*val = *(uint16_t *)data;
+-	return 0;
+-}
+-
+-static int debugfs_u16_set(void *data, uint64_t val)
+-{
+-	*(uint16_t *)data = val;
+-	return 0;
+-}
+-
+-DEFINE_SIMPLE_ATTRIBUTE(fops_u16, debugfs_u16_get, debugfs_u16_set, "%llu\n");
+-
+-int32_t sysCreateMonDbgFs(struct GLUE_INFO *prGlueInfo)
+-{
+-	struct dentry *dbgFsFile;
+-
+-	dbgFsDir = debugfs_create_dir("mtk_mon_dbgfs", NULL);
+-	if (!dbgFsDir) {
+-		DBGLOG(INIT, ERROR,
+-				"dbgFsDir is null for mtk_mon_dbgfs\n");
+-		return -1;
+-	}
+-
+-	/* /sys/kernel/debug/mtk_mon_dbgfs/hemu_aid, mode: wr */
+-	dbgFsFile = debugfs_create_file("hemu_aid",
+-		0666, dbgFsDir, &prGlueInfo->u2Aid, &fops_u16);
+-
+-	/* /sys/kernel/debug/mtk_mon_dbgfs/band_idx, mode: wr */
+-	dbgFsFile = debugfs_create_file("band_idx",
+-		0666, dbgFsDir, &prGlueInfo->ucBandIdx, &fops_u8);
+-
+-	/* /sys/kernel/debug/mtk_mon_dbgfs/drop_fcs_err, mode: wr */
+-	dbgFsFile = debugfs_create_file("drop_fcs_err",
+-		0666, dbgFsDir, &prGlueInfo->fgDropFcsErrorFrame, &fops_u8);
+-
+-	return 0;
+-}
+-
+-void sysRemoveMonDbgFs(void)
+-{
+-	debugfs_remove_recursive(dbgFsDir);
+-}
+ #endif
+ 
+ /*  For DTV Ref project -> Default enable */
+@@ -3201,6 +3142,13 @@
+ 	ASSERT(prDev);
+ 	ASSERT(prGlueInfo);
+ 
++#ifdef CFG_SUPPORT_SNIFFER_RADIOTAP
++	if (unlikely(prDev->type == ARPHRD_IEEE80211_RADIOTAP)) {
++		dev_kfree_skb(prSkb);
++		return NETDEV_TX_OK;
++	}
++#endif
++
+ 	prNetDevPrivate = (struct NETDEV_PRIVATE_GLUE_INFO *)
+ 			  netdev_priv(prDev);
+ 	ASSERT(prNetDevPrivate->prGlueInfo == prGlueInfo);
+@@ -7558,7 +7506,6 @@
+ 
+ #ifdef CFG_SUPPORT_SNIFFER_RADIOTAP
+ 		prGlueInfo->fgIsEnableMon = FALSE;
+-		sysCreateMonDbgFs(prGlueInfo);
+ #endif
+ 
+ #if CFG_MET_PACKET_TRACE_SUPPORT
+@@ -7882,9 +7829,6 @@
+ #if WLAN_INCLUDE_SYS
+ 	sysRemoveSysfs();
+ #endif /* WLAN_INCLUDE_SYS */
+-#ifdef CFG_SUPPORT_SNIFFER_RADIOTAP
+-	sysRemoveMonDbgFs();
+-#endif
+ 	kalPerMonDestroy(prGlueInfo);
+ 
+ 	/* Unregister notifier callback */
+diff --git a/connectivity/wlan/core/gen4m/os/linux/gl_kal.c b/connectivity/wlan/core/gen4m/os/linux/gl_kal.c
+--- a/connectivity/wlan/core/gen4m/os/linux/gl_kal.c
++++ b/connectivity/wlan/core/gen4m/os/linux/gl_kal.c
+@@ -1543,15 +1543,12 @@
+ {
+ 	struct sk_buff *prSkb;
+ 
+-	prSkb = (struct sk_buff *)pvPacket;
+-	/* exceed skb headroom the kernel will panic */
+-	if (skb_headroom(prSkb) < radiotap_len) {
+-		DBGLOG(INIT, ERROR,
+-			"radiotap[%u] exceed skb headroom[%u]!\n",
+-			radiotap_len,
+-			skb_headroom(prSkb));
++	prSkb = pvPacket;
++	/* The descriptor counts bytes from the original data pointer. */
++	if (!prSkb || skb_is_nonlinear(prSkb) ||
++	    skb_headroom(prSkb) < radiotap_len ||
++	    u2RxByteCount > skb_end_pointer(prSkb) - prSkb->data)
+ 		return FALSE;
+-	}
+ 
+ 	skb_push(prSkb, radiotap_len);
+ 	*ppucData = (uint8_t *)(prSkb->data);
+@@ -1952,6 +1949,26 @@
+ 	ASSERT(pvPkt);
+ 
+ 	prSkb = pvPkt;
++#ifdef CFG_SUPPORT_SNIFFER_RADIOTAP
++	/* A queued frame can outlive the interface type at which it arrived. */
++	if (GLUE_TEST_PKT_FLAG(prSkb, ENUM_PKT_802_11) ||
++	    (prNetDev && READ_ONCE(prNetDev->type) == ARPHRD_IEEE80211_RADIOTAP)) {
++		if (!GLUE_TEST_PKT_FLAG(prSkb, ENUM_PKT_802_11) || !prNetDev ||
++		    READ_ONCE(prNetDev->type) != ARPHRD_IEEE80211_RADIOTAP) {
++			kalPacketFree(prGlueInfo, prSkb);
++			return WLAN_STATUS_SUCCESS;
++		}
++		prSkb->dev = prNetDev;
++		skb_reset_mac_header(prSkb);
++		prSkb->ip_summed = CHECKSUM_NONE;
++		prSkb->pkt_type = PACKET_OTHERHOST;
++		prSkb->protocol = htons(ETH_P_802_2);
++		prNetDev->stats.rx_bytes += prSkb->len;
++		prNetDev->stats.rx_packets++;
++		netif_rx(prSkb);
++		return WLAN_STATUS_SUCCESS;
++	}
++#endif
+ 	prChipInfo = prGlueInfo->prAdapter->chip_info;
+ 	ucBssIdx = GLUE_GET_PKT_BSS_IDX(prSkb);
+ 	RX_INC_CNT(&prGlueInfo->prAdapter->rRxCtrl, RX_DATA_INDICATION_COUNT);
+@@ -2013,18 +2030,7 @@
+ 	prNetDev->last_rx = jiffies;
+ #endif
+ 
+-#ifdef CFG_SUPPORT_SNIFFER_RADIOTAP
+-	if (prGlueInfo->fgIsEnableMon) {
+-		skb_reset_mac_header(prSkb);
+-		prSkb->ip_summed = CHECKSUM_UNNECESSARY;
+-		prSkb->pkt_type = PACKET_OTHERHOST;
+-		prSkb->protocol = htons(ETH_P_802_2);
+-	} else {
+-		prSkb->protocol = eth_type_trans(prSkb, prNetDev);
+-	}
+-#else
+ 	prSkb->protocol = eth_type_trans(prSkb, prNetDev);
+-#endif
+ 	prSkb->dev = prNetDev;
+ 
+ 	if (prSkb->tail > prSkb->end) {
+diff --git a/connectivity/wlan/core/gen4m/os/linux/gl_wext_priv.c b/connectivity/wlan/core/gen4m/os/linux/gl_wext_priv.c
+--- a/connectivity/wlan/core/gen4m/os/linux/gl_wext_priv.c
++++ b/connectivity/wlan/core/gen4m/os/linux/gl_wext_priv.c
+@@ -9157,85 +9157,6 @@
+ }
+ #endif /* #if ((CFG_SUPPORT_ICS == 1) || (CFG_SUPPORT_PHY_ICS == 1)) */
+ 
+-#ifdef CFG_SUPPORT_SNIFFER_RADIOTAP
+-int priv_driver_set_monitor(struct net_device *prNetDev,
+-			       char *pcCommand, int i4TotalLen)
+-{
+-	struct GLUE_INFO *prGlueInfo = NULL;
+-	struct ADAPTER *prAdapter = NULL;
+-	uint32_t rStatus = WLAN_STATUS_SUCCESS;
+-	uint32_t u4BufLen = 0;
+-	int32_t i4BytesWritten = 0;
+-	int32_t i4Argc = 0;
+-	int8_t *apcArgv[WLAN_CFG_ARGV_MAX] = {0};
+-	int32_t i4Recv = 0;
+-	int8_t *this_char = NULL;
+-	uint8_t ucBandIdx, ucBand, ucPriChannel, ucChannelWidth;
+-	uint8_t ucChannelS1, ucChannelS2, ucSco, fgDropFcsErrorFrame;
+-	uint16_t u2Aid;
+-
+-	ASSERT(prNetDev);
+-	if (GLUE_CHK_PR2(prNetDev, pcCommand) == FALSE)
+-		return -1;
+-	prGlueInfo = *((struct GLUE_INFO **) netdev_priv(prNetDev));
+-	prAdapter = prGlueInfo->prAdapter;
+-
+-	DBGLOG(REQ, LOUD, "command is %s\n", pcCommand);
+-	wlanCfgParseArgument(pcCommand, &i4Argc, apcArgv);
+-	DBGLOG(REQ, LOUD, "argc is %d, apcArgv[0] = %s\n\n", i4Argc, *apcArgv);
+-
+-	this_char = kalStrStr(*apcArgv, "=");
+-	if (!this_char)
+-		return -1;
+-	this_char++;
+-
+-	DBGLOG(REQ, LOUD, "string = %s\n", this_char);
+-
+-	i4Recv = sscanf(this_char, "%d-%d-%d-%d-%d-%d-%d-%d-%d",
+-			&ucBandIdx, &ucBand, &ucPriChannel,
+-			&ucChannelWidth, &ucChannelS1, &ucChannelS2,
+-			&ucSco, &fgDropFcsErrorFrame, &u2Aid);
+-
+-	if (i4Recv == 9) {
+-		prGlueInfo->ucBandIdx = ucBandIdx;
+-		prGlueInfo->ucBand = ucBand;
+-		prGlueInfo->ucPriChannel = ucPriChannel;
+-		prGlueInfo->ucChannelWidth = ucChannelWidth;
+-		prGlueInfo->ucChannelS1 = ucChannelS1;
+-		prGlueInfo->ucChannelS2 = ucChannelS2;
+-		prGlueInfo->ucSco = ucSco;
+-		prGlueInfo->fgDropFcsErrorFrame = fgDropFcsErrorFrame;
+-		prGlueInfo->u2Aid = u2Aid;
+-
+-		i4BytesWritten = kalSnprintf(pcCommand, i4TotalLen,
+-			"Apply BnIdx %d\n", prGlueInfo->ucBandIdx);
+-
+-		rStatus = kalIoctl(prGlueInfo, wlanoidSetMonitor,
+-			NULL, 0, &u4BufLen);
+-
+-		if (rStatus != WLAN_STATUS_SUCCESS)
+-			return -1;
+-	} else {
+-		DBGLOG(REQ, ERROR, "iwpriv wlanXX driver monitor=Option\n");
+-		DBGLOG(REQ, ERROR,
+-			"Option:[BnIdx]-[Bn]-[ChP]-[BW]-[ChS1]-[ChS2]-[Sco]-[dropFcsErr]-[AID]\n");
+-		DBGLOG(REQ, ERROR, "[BnIdx]Band Index\n");
+-		DBGLOG(REQ, ERROR, "[Bn]2G=1, 5G=2, 6G=3\n");
+-		DBGLOG(REQ, ERROR, "[ChP]Primary Channel\n");
+-		DBGLOG(REQ, ERROR, "[BW]BW20=0, BW40=0, BW80=1, BW160=2, BW80P80=3, BW320=6\n");
+-		DBGLOG(REQ, ERROR, "[ChS1]Center1 Channel\n");
+-		DBGLOG(REQ, ERROR, "[ChS2]Center2 Channel\n");
+-		DBGLOG(REQ, ERROR, "[Sco]Secondary Channel Offset\n");
+-		DBGLOG(REQ, ERROR, "[dropFcsErr]Drop FCS Error\n");
+-		DBGLOG(REQ, ERROR, "[AID]OFDMA AID\n");
+-
+-		i4BytesWritten = kalSnprintf(pcCommand, i4TotalLen,
+-					"Wrong param\n");
+-	}
+-
+-	return i4BytesWritten;
+-}
+-#endif
+ 
+ #ifdef CFG_SUPPORT_UNIFIED_COMMAND
+ int priv_driver_set_unified_fixed_rate(struct net_device *prNetDev,
+diff --git a/connectivity/wlan/core/gen4m/os/linux/hif/common/kal_pdma.c b/connectivity/wlan/core/gen4m/os/linux/hif/common/kal_pdma.c
+--- a/connectivity/wlan/core/gen4m/os/linux/hif/common/kal_pdma.c
++++ b/connectivity/wlan/core/gen4m/os/linux/hif/common/kal_pdma.c
+@@ -2474,6 +2474,20 @@
+ 	pRxD->SDPtr1 = 0;
+ #endif
+ 
++#if defined(CFG_SUPPORT_SNIFFER_RADIOTAP) && !defined(CFG_SUPPORT_PDMA_SCATTER)
++	if (READ_ONCE(prGlueInfo->fgIsEnableMon)) {
++		struct mt66xx_chip_info *chip = prAdapter->chip_info;
++
++		if (pRxD->SDLen0 < chip->rxd_size ||
++		    pRxD->SDLen0 > prRxRing->u4BufSize ||
++		    chip->prRxDescOps->nic_rxd_get_rx_byte_count(prSwRfb->prRxStatus) >
++			pRxD->SDLen0) {
++			fgRet = FALSE;
++			goto skip;
++		}
++	}
++#endif
++
+ #ifdef CFG_SUPPORT_PDMA_SCATTER
+ 	if (prGlueInfo->fgIsEnableMon && fgRet == FALSE) {
+ 		pucRecvBuff = ((struct sk_buff *)prRxRing->pvPacket)->data;
+diff --git a/connectivity/wlan/core/gen4m/os/linux/include/gl_cmd_validate.h b/connectivity/wlan/core/gen4m/os/linux/include/gl_cmd_validate.h
+--- a/connectivity/wlan/core/gen4m/os/linux/include/gl_cmd_validate.h
++++ b/connectivity/wlan/core/gen4m/os/linux/include/gl_cmd_validate.h
+@@ -215,9 +215,6 @@
+ #if ((CFG_SUPPORT_ICS == 1) || (CFG_SUPPORT_PHY_ICS == 1))
+ #define CMD_SET_SNIFFER			"SNIFFER"
+ #endif /* CFG_SUPPORT_ICS */
+-#ifdef CFG_SUPPORT_SNIFFER_RADIOTAP
+-#define CMD_SET_MONITOR			"MONITOR"
+-#endif
+ #if CFG_SUPPORT_CSI
+ #define CMD_SET_CSI			"SET_CSI"
+ #endif /* CFG_SUPPORT_CSI */
+diff --git a/connectivity/wlan/core/gen4m/os/linux/include/gl_wext_priv.h b/connectivity/wlan/core/gen4m/os/linux/include/gl_wext_priv.h
+--- a/connectivity/wlan/core/gen4m/os/linux/include/gl_wext_priv.h
++++ b/connectivity/wlan/core/gen4m/os/linux/include/gl_wext_priv.h
+@@ -577,10 +577,6 @@
+ int priv_driver_sniffer(struct net_device *prNetDev,
+ 	char *pcCommand, int i4TotalLen);
+ #endif /* CFG_SUPPORT_ICS || CFG_SUPPORT_PHY_ICS */
+-#ifdef CFG_SUPPORT_SNIFFER_RADIOTAP
+-int priv_driver_set_monitor(struct net_device *prNetDev,
+-	char *pcCommand, int i4TotalLen);
+-#endif /* CFG_SUPPORT_SNIFFER_RADIOTAP */
+ int priv_driver_get_sw_ctrl(struct net_device *prNetDev,
+ 	char *pcCommand, int i4TotalLen);
+ int priv_driver_set_mcr(struct net_device *prNetDev,
+diff --git a/connectivity/wlan/core/gen4m/os/linux/include/gl_os.h b/connectivity/wlan/core/gen4m/os/linux/include/gl_os.h
+--- a/connectivity/wlan/core/gen4m/os/linux/include/gl_os.h
++++ b/connectivity/wlan/core/gen4m/os/linux/include/gl_os.h
+@@ -1683,10 +1683,6 @@
+ uint32_t connsysFwLogControl(struct ADAPTER *prAdapter,
+ 	void *pvSetBuffer, uint32_t u4SetBufferLen, uint32_t *pu4SetInfoLen);
+ #endif
+-#ifdef CFG_SUPPORT_SNIFFER_RADIOTAP
+-int32_t sysCreateMonDbgFs(struct GLUE_INFO *prGlueInfo);
+-void sysRemoveMonDbgFs(void);
+-#endif
+ 
+ #if CFG_CHIP_RESET_SUPPORT && !CFG_WMT_RESET_API_SUPPORT
+ extern void WfsysResetHdlr(struct work_struct *work);
