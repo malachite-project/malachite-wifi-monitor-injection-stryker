@@ -1,6 +1,0 @@
-id=malachite_wifi_monitor
-name=malachite: passive Wi-Fi monitor (TEST)
-version=1.3-passive
-versionCode=14
-author=noamtu123
-description=Opt-in controls for a separately integrated passive test driver. The Action button displays status. No boot-time Wi-Fi changes.

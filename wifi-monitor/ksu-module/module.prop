@@ -1,0 +1,6 @@
+id=malachite_stryker_monitor
+name=malachite: Stryker + Wi-Fi monitor (native)
+version=1.4.6
+versionCode=22
+author=noamtu123
+description=Native monitor mode + injection + WPA handshake capture on malachite's internal MT6878 Wi-Fi (no USB adapter). Early-loads the source-built gen4m driver (cfg80211 + wlan) at post-fs-data: monitor RX at the nicRxProcessPacketType choke-point, off-channel injection, low-battery pmic_lbat_service callback compiled out (CFI-safe), mac80211 dropped. Installs the Stryker malachite fork wired for the PROVEN capture path: airodump runs with AIRCRACK_NEXMON=1 + --ignore-negative-one on the externally-armed monitor, broadcast mal-deauth, auto channel. Handshake capture + crack verified on-device. v1.4.6: capture success now read from the .cap itself (not airodump stdout) and only a self-consistent handshake (M1+M2 same replay, or coherent M1-M2-M3) counts. Keep Wi-Fi ON and SELinux enforcing; the capturing phone must NOT be joined to a Wi-Fi network (an active connection pins the radio channel). Fail-safe restores the stock driver if ours fails. Authorized security testing only.
