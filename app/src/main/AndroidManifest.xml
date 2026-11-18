@@ -201,20 +201,6 @@
                 android:resource="@xml/shortcuts" />
         </activity>
 
-        <activity-alias
-            android:name=".TerminalLauncher"
-            android:exported="true"
-            android:icon="@mipmap/ic_launcher"
-            android:roundIcon="@mipmap/ic_launcher_round"
-            android:label="@string/terminal_launcher_label"
-            android:targetActivity="com.stryker.terminal.ui.term.NeoTermActivity">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity-alias>
-
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.provider"

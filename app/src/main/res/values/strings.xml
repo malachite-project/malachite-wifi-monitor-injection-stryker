@@ -1571,5 +1571,5 @@ manager</string>
     <string name="app_language_title">App language</string>
     <string name="app_language_english">English</string>
     <string name="app_language_system">Use device language</string>
-    <string name="devicefork_name" translatable="false">Stryker S21 (dev)</string>
+    <string name="devicefork_name" translatable="false">Stryker Malachite</string>
 </resources>

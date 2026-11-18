@@ -170,8 +170,20 @@ public class MonitorManager {
                 recovery.edit().putBoolean("wifi_was_on", wifiWasOn)
                         .putBoolean("restore_pending", true).commit();
             }
-            // MT6878/gen4m: do NOT disable Wi-Fi here - turning Wi-Fi off removes the
-            // wlan0 netdev on this driver. Keep it on; we only flip the interface type.
+            // MT6878/gen4m: an ACTIVE STA association PINS the radio to that network's
+            // channel, so monitor capture on another channel receives nothing (confirmed
+            // on-device). Flipping the interface type alone does NOT clear that pin. Cycle
+            // Wi-Fi off/on to drop the association, then arm monitor before Android rejoins.
+            // Wi-Fi must stay ON for wlan0 to exist on this driver, so we re-enable and wait
+            // for the netdev to reappear. (svc wifi disable briefly removes wlan0 - expected.)
+            core.customCommand("cmd wifi set-scan-always-available disabled", true);
+            core.customCommand("svc wifi disable", true);
+            try { Thread.sleep(2000); } catch (InterruptedException ignored) {}
+            core.customCommand("svc wifi enable", true);
+            for (int w = 0; w < 15; w++) {
+                if (internalInterfaceType() != -1) break;
+                try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
+            }
         }
         String startCommand = monitorCommandFor(ifc, channel);
         if ("wlan0".equals(ifc)) {

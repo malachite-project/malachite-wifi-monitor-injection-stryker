@@ -133,10 +133,24 @@ public abstract class AdvancedProcess {
     static String lineBuffered(String command) {
         if (command == null) return null;
         String trimmed = command.trim();
+        // Preserve leading VAR=val env assignments (e.g. AIRCRACK_NEXMON=1) so they
+        // still apply to the tool once stdbuf is inserted between them and the binary.
+        StringBuilder env = new StringBuilder();
+        while (true) {
+            int sp = trimmed.indexOf(' ');
+            if (sp <= 0) break;
+            String tok = trimmed.substring(0, sp);
+            if (tok.matches("[A-Za-z_][A-Za-z0-9_]*=[^ ]*")) {
+                env.append(tok).append(' ');
+                trimmed = trimmed.substring(sp + 1).trim();
+            } else {
+                break;
+            }
+        }
         int space = trimmed.indexOf(' ');
         String first = space < 0 ? trimmed : trimmed.substring(0, space);
         if (!LIVE_OUTPUT_TOOLS.contains(first)) return command;
-        return "__SB=$(command -v stdbuf 2>/dev/null); $__SB ${__SB:+-oL -eL} " + trimmed;
+        return "__SB=$(command -v stdbuf 2>/dev/null); " + env + "$__SB ${__SB:+-oL -eL} " + trimmed;
     }
 
     public AdvancedProcess setNoLog(boolean noLog) {
