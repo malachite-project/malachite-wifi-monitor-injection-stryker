@@ -840,6 +840,9 @@ public class Wifi extends Fragment {
                     // osdep trust the externally-armed monitor and not touch the radio.
                     core.customCommand("mkdir -p " + hsDir + " " + capturedDir + "; "
                             + "rm -f " + hsDir + "/s21dev_scan*", true);
+                    // AIRCRACK_NEXMON=1: make the osdep trust the externally-armed
+                    // monitor and NOT touch the radio — required on gen4m or airodump
+                    // mishandles the channel and never delivers the EAPOL handshake.
                     cmd = "AIRCRACK_NEXMON=1 " + core.nativeTool("airodump-ng") + " " + capIface + " -w " + hsDir
                             + "/s21dev_scan --ignore-negative-one --output-format pcap,csv  --update 3";
                 } else {
@@ -867,9 +870,10 @@ public class Wifi extends Fragment {
                         if (line.contains("WPA handshake")) {
                             Matcher m = Pattern.compile("((\\w{2}:){5}\\w{2})").matcher(line);
                             if (m.find()) {
-                                if (!hs.contains(m.group())) {
-                                    hs.add(m.group());
-                                    totalSuccess[0]++;
+                                String bssid = m.group().toUpperCase(Locale.ENGLISH);
+                                if (!hs.contains(bssid)) {
+                                    hs.add(bssid);
+                                    totalSuccess[0] = hs.size();
                                     monitor.metric(AttackMetric.CAPTURED, totalSuccess[0]);
                                     monitor.stage(AttackStage.EAPOL, AttackStage.State.DONE,
                                             totalSuccess[0] + " captured so far");
@@ -953,6 +957,33 @@ public class Wifi extends Fragment {
 
                             }
                         }
+                        // Trust the capture file, not airodump's live display. On the
+                        // internal gen4m radio airodump's own "WPA handshake" indicator
+                        // may never print even though the EAPOL frames are already on
+                        // disk, so poll the .cap itself and count any complete handshake.
+                        try {
+                            java.io.File cap = newestCapture(hsDir, "s21dev_scan-");
+                            if (cap != null) {
+                                com.zalexdev.stryker.handshakes.CaptureInfo.forget();
+                                com.zalexdev.stryker.handshakes.CaptureInfo info =
+                                        com.zalexdev.stryker.handshakes.CaptureInfo.of(cap);
+                                // Count only a self-consistent (crackable) handshake or a
+                                // PMKID — a complete-but-mismatched set is not a real catch.
+                                if (info.solid || info.pmkid) {
+                                    String bssid = (info.bssid == null ? "" : info.bssid)
+                                            .toUpperCase(Locale.ENGLISH);
+                                    String key = bssid.isEmpty() ? "CAP" : bssid;
+                                    if (!hs.contains(key)) {
+                                        hs.add(key);
+                                        totalSuccess[0] = hs.size();
+                                        monitor.metric(AttackMetric.CAPTURED, totalSuccess[0]);
+                                        monitor.stage(AttackStage.EAPOL, AttackStage.State.DONE,
+                                                totalSuccess[0] + " captured so far");
+                                    }
+                                }
+                            }
+                        } catch (Throwable ignored) {
+                        }
                     }
                 }, 0, 2500);
                 String deauthIface = core.getDeauthInterface();
@@ -995,12 +1026,7 @@ public class Wifi extends Fragment {
             } catch (Exception e) {
                 e.printStackTrace();
             }
-            final int captured = hs.size();
-            if (captured == 0) {
-                monitor.finish(false, "No handshake captured");
-            } else {
-                monitor.stage(AttackStage.SAVE, AttackStage.State.ACTIVE);
-            }
+            monitor.stage(AttackStage.SAVE, AttackStage.State.ACTIVE);
             new Thread(() -> {
                 if (nativeCap) {
                     core.stopAirodumpHost(hsDir + "/s21dev_scan");
@@ -1010,24 +1036,51 @@ public class Wifi extends Fragment {
                 if (airodump != null) {
                     airodump.kill();
                 }
-                if (captured > 0) {
-                    String strDate = new SimpleDateFormat("dd-MM_HH-mm", Locale.ENGLISH).format(new Date());
-                    String dest = capturedDir + "/MassHS_" + captured + "_" + strDate + ".cap";
-                    java.io.File src = newestCapture(hsDir, "s21dev_scan-");
-                    boolean saved = false;
-                    if (src != null) {
-                        new java.io.File(capturedDir).mkdirs();
-                        core.moveFile(src.getAbsolutePath(), dest);
-                        saved = new java.io.File(dest).isFile();
+                // Let airodump flush its final pcap records before the last check.
+                try {
+                    Thread.sleep(600);
+                } catch (InterruptedException ignored) {
+                }
+                // Final authority: does the capture file itself hold a handshake?
+                // This catches a handshake grabbed in the last window that neither
+                // airodump's display nor the periodic poll had reported yet.
+                java.io.File src = newestCapture(hsDir, "s21dev_scan-");
+                boolean capSolid = false, capUsable = false;
+                if (src != null) {
+                    try {
+                        com.zalexdev.stryker.handshakes.CaptureInfo.forget();
+                        com.zalexdev.stryker.handshakes.CaptureInfo info =
+                                com.zalexdev.stryker.handshakes.CaptureInfo.of(src);
+                        capSolid = info.solid || info.pmkid;
+                        capUsable = info.usable();
+                    } catch (Throwable ignored) {
                     }
-                    if (saved) {
-                        monitor.stage(AttackStage.SAVE, AttackStage.State.DONE, dest);
-                        monitor.finish(true, totalSuccess[0] + " handshakes\n" + dest);
-                    } else {
+                }
+                int captured = Math.max(hs.size(), capSolid ? 1 : 0);
+                // Save whenever the file holds anything usable so nothing is lost, but
+                // only report success when a self-consistent handshake was caught.
+                if (src == null || (!capUsable && hs.isEmpty())) {
+                    monitor.stage(AttackStage.SAVE, AttackStage.State.FAILED,
+                            "No handshake captured");
+                    monitor.finish(false, "No handshake captured");
+                } else {
+                    String strDate = new SimpleDateFormat("dd-MM_HH-mm", Locale.ENGLISH).format(new Date());
+                    String tag = captured > 0 ? "MassHS_" + captured : "MassHS_partial";
+                    String dest = capturedDir + "/" + tag + "_" + strDate + ".cap";
+                    new java.io.File(capturedDir).mkdirs();
+                    core.moveFile(src.getAbsolutePath(), dest);
+                    boolean saved = new java.io.File(dest).isFile();
+                    if (!saved) {
                         monitor.stage(AttackStage.SAVE, AttackStage.State.FAILED,
                                 "Nothing to move out of the share");
-                        monitor.finish(false, totalSuccess[0]
-                                + " handshakes, but the capture file could not be saved — check the log");
+                        monitor.finish(false, "The capture file could not be saved — check the log");
+                    } else if (captured > 0) {
+                        monitor.stage(AttackStage.SAVE, AttackStage.State.DONE, dest);
+                        monitor.finish(true, captured + " handshake(s)\n" + dest);
+                    } else {
+                        monitor.stage(AttackStage.SAVE, AttackStage.State.DONE, dest);
+                        monitor.finish(false, "Caught EAPOL frames but no consistent handshake yet"
+                                + " — saved the capture anyway:\n" + dest);
                     }
                 }
                 String captureIface = core.getHSInterface();

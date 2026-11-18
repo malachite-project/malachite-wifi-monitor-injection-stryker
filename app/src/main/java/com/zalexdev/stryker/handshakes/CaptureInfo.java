@@ -26,6 +26,17 @@ public final class CaptureInfo {
     public int packets;
     public int eapol;
     public boolean pmkid;
+    /**
+     * A handshake is "solid" only when its EAPOL frames are self-consistent and
+     * therefore actually crackable: an M1+M2 pair sharing one replay counter (the
+     * client's M2 is the direct reply to that M1, so its SNonce pairs with that
+     * ANonce), or a full coherent M1→M2→M3 chain. An M2 stitched to an M3 from a
+     * different association attempt (different replay / no linking M1) looks
+     * complete but no password can validate it — that is NOT solid. Capture
+     * engines should keep going until {@code solid}; {@link #usable()} stays true
+     * for a weak handshake so a manual stop can still save whatever was caught.
+     */
+    public boolean solid;
 
     public boolean usable() {
         return kind == Kind.HANDSHAKE || kind == Kind.PMKID;
@@ -78,7 +89,11 @@ public final class CaptureInfo {
 
             if (link != 105 && link != 127) return out;
 
-            Set<Integer> msgs = new HashSet<>();
+            // Per-station EAPOL tracking. Messages are only a handshake when they
+            // belong to the SAME client (bssid/station pair), and only CRACKABLE
+            // when they are self-consistent — see Sta.solid(). We also record the
+            // ANonce (M1/M3) and SNonce replay counters needed for that check.
+            Map<String, Sta> sta = new HashMap<>();
             byte[] buf = new byte[65536];
             byte[] rec = new byte[16];
 
@@ -92,13 +107,34 @@ public final class CaptureInfo {
                 if (incl <= 0 || incl > buf.length) break;
                 if (!readOrEof(in, buf, incl)) break;
                 out.packets++;
-                parse(buf, incl, link, out, msgs);
+                parse(buf, incl, link, out, sta);
             }
 
-            out.eapol = msgs.size();
-            boolean full = (msgs.contains(1) && msgs.contains(2))
-                    || (msgs.contains(2) && msgs.contains(3))
-                    || (msgs.contains(3) && msgs.contains(4));
+            int allMsgs = 0;
+            boolean full = false;
+            for (Map.Entry<String, Sta> e : sta.entrySet()) {
+                Sta st = e.getValue();
+                allMsgs |= st.mask;
+                // A crackable handshake MUST carry the client's SNonce (only M2
+                // has it) plus an ANonce source (M1 or M3). Drop M3+M4-only: with
+                // no SNonce there is nothing to derive the PTK from.
+                boolean weak = st.hasSnonce()
+                        && (((st.mask & (1 << 1)) != 0) || ((st.mask & (1 << 3)) != 0));
+                boolean solid = st.solid();
+                if (weak || solid) {
+                    if (!full || (solid && !out.solid)) {
+                        int slash = e.getKey().indexOf('/');
+                        if (slash > 0) {
+                            out.bssid = e.getKey().substring(0, slash);
+                            out.station = e.getKey().substring(slash + 1);
+                        }
+                    }
+                    full = true;
+                    if (solid) out.solid = true;
+                }
+            }
+            // eapol = distinct message numbers (1..4) seen anywhere, for display.
+            out.eapol = Integer.bitCount(allMsgs & 0x1E);
             if (full) out.kind = Kind.HANDSHAKE;
             else if (out.pmkid) out.kind = Kind.PMKID;
             else out.kind = Kind.EMPTY;
@@ -119,7 +155,44 @@ public final class CaptureInfo {
         return true;
     }
 
-    private static void parse(byte[] p, int len, int link, CaptureInfo out, Set<Integer> msgs) {
+    /** Per-client EAPOL state gathered from one capture. */
+    private static final class Sta {
+        int mask;                                   // bit N set = message N seen
+        boolean snonce;                             // a non-zero SNonce (M2) was seen
+        final Map<Long, String> anonceM1 = new HashMap<>(); // replay -> ANonce (M1)
+        final Map<Long, String> anonceM3 = new HashMap<>(); // replay -> ANonce (M3)
+        final Set<Long> m2Replay = new HashSet<>(); // replays of M2s carrying an SNonce
+
+        boolean hasSnonce() { return snonce; }
+
+        /** True when the frames form a genuinely crackable, self-consistent set. */
+        boolean solid() {
+            // Gold pair: an M1 and M2 sharing one replay counter — the M2 is the
+            // direct reply to that M1, so SNonce(M2) pairs with ANonce(M1).
+            for (Long r : m2Replay) {
+                if (anonceM1.containsKey(r)) return true;
+            }
+            // Coherent chain: M3 whose ANonce matches the M1 of the previous
+            // replay, with the matching M2 also present (M1 r, M2 r, M3 r+1).
+            for (Map.Entry<Long, String> e : anonceM3.entrySet()) {
+                long r3 = e.getKey();
+                String a1 = anonceM1.get(r3 - 1);
+                if (a1 != null && a1.equals(e.getValue()) && m2Replay.contains(r3 - 1)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    private static String hex32(byte[] p, int at, int len) {
+        if (at + 32 > len) return "";
+        StringBuilder sb = new StringBuilder(64);
+        for (int i = 0; i < 32; i++) sb.append(String.format("%02x", p[at + i]));
+        return sb.toString();
+    }
+
+    private static void parse(byte[] p, int len, int link, CaptureInfo out, Map<String, Sta> sta) {
         int off = 0;
         if (link == 127) {
             if (len < 4) return;
@@ -173,12 +246,42 @@ public final class CaptureInfo {
         else if (mic && secure) msg = 4;
         else if (mic) msg = 2;
         else return;
-        msgs.add(msg);
 
         boolean fromAp = msg == 1 || msg == 3;
         String a1 = mac(p, off + 4), a2 = mac(p, off + 10);
-        if (out.bssid.isEmpty()) out.bssid = fromAp ? a2 : a1;
-        if (out.station.isEmpty()) out.station = fromAp ? a1 : a2;
+        // bssid = the AP side, station = the client side, regardless of direction.
+        String bssid = fromAp ? a2 : a1;
+        String station = fromAp ? a1 : a2;
+        if (out.bssid.isEmpty()) out.bssid = bssid;
+
+        String staKey = bssid + "/" + station;
+        Sta st = sta.get(staKey);
+        if (st == null) {
+            st = new Sta();
+            sta.put(staKey, st);
+        }
+        st.mask |= (1 << msg);
+
+        // Replay counter (8 bytes BE) and key nonce (32 bytes) within the key frame.
+        long replay = 0;
+        for (int i = 0; i < 8; i++) replay = (replay << 8) | (p[k + 9 + i] & 0xFFL);
+        int nonceAt = k + 17;
+        boolean nonceNonZero = false;
+        if (nonceAt + 32 <= len) {
+            for (int i = 0; i < 32; i++) {
+                if ((p[nonceAt + i] & 0xFF) != 0) { nonceNonZero = true; break; }
+            }
+        }
+        if (msg == 1) {
+            st.anonceM1.put(replay, hex32(p, nonceAt, len));
+        } else if (msg == 3) {
+            st.anonceM3.put(replay, hex32(p, nonceAt, len));
+        } else if (msg == 2 && nonceNonZero) {
+            st.snonce = true;
+            st.m2Replay.add(replay);
+        } else if (msg == 4 && nonceNonZero) {
+            st.snonce = true;
+        }
 
         if (msg == 1 && kdLen >= 22) {
             int d = k + 99;
